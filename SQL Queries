@@ -55,3 +55,57 @@ SELECT * FROM fenyolab_registry_wksp.sbapph_warfarin_dose_timing LIMIT 10;
 
 -- Check data in sbapph_inr_control
 SELECT * FROM fenyolab_registry_wksp.sbapph_inr_control LIMIT 10;
+
+
+-- Identify missed/delayed doses
+SELECT 
+    wp.pat_id, 
+    wp.pat_enc_csn_id,
+    dt.scheduled_time AS dose_scheduled_time,
+    dt.taken_time AS dose_taken_time,
+    CASE 
+        WHEN dt.scheduled_time IS NULL THEN 'Missed'
+        WHEN dt.scheduled_time < dt.taken_time THEN 'Delayed'
+        ELSE 'On Time'
+    END AS dose_status
+FROM 
+    fenyolab_registry_wksp.sbapph_warfarin_patients wp
+LEFT JOIN 
+    fenyolab_registry_wksp.sbapph_warfarin_dose_timing dt 
+    ON wp.pat_enc_csn_id = dt.pat_enc_csn_id;
+
+CREATE TABLE fenyolab_registry_wksp.sbapph_dose_inr_analysis AS
+SELECT 
+    wp.pat_id,
+    wp.pat_enc_csn_id,
+    dt.scheduled_time AS dose_scheduled_time,
+    dt.taken_time AS dose_taken_time,
+    CASE 
+        WHEN dt.scheduled_time IS NULL THEN 'Missed'
+        WHEN dt.scheduled_time < dt.taken_time THEN 'Delayed'
+        ELSE 'On Time'
+    END AS dose_status,
+    ir.result_time AS inr_result_time,
+    ir.inr_value,
+    CASE 
+        WHEN ir.inr_value < 2.0 THEN 'Low'
+        WHEN ir.inr_value > 3.0 THEN 'High'
+        ELSE 'Within Range'
+    END AS inr_status
+FROM 
+    fenyolab_registry_wksp.sbapph_warfarin_patients wp
+LEFT JOIN 
+    fenyolab_registry_wksp.sbapph_warfarin_dose_timing dt 
+    ON wp.pat_enc_csn_id = dt.pat_enc_csn_id
+LEFT JOIN 
+    fenyolab_registry_wksp.sbapph_warfarin_inr_results ir 
+    ON wp.pat_enc_csn_id = ir.pat_enc_csn_id
+WHERE 
+    dt.scheduled_time IS NULL OR dt.scheduled_time < dt.taken_time
+ORDER BY 
+    wp.pat_id, ir.result_time;
+
+
+-- Look at Subsequent INR Levels for Missed/delayed doses
+SELECT * FROM fenyolab_registry_wksp.sbapph_dose_inr_analysis LIMIT 50;
+
