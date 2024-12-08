@@ -1,0 +1,57 @@
+-- Identify Warfarin patients
+CREATE TABLE fenyolab_registry_wksp.sbapph_warfarin_patients AS
+SELECT DISTINCT pat_id, pat_enc_csn_id
+FROM fenyolab_registry.medication
+WHERE pharm_class LIKE '%COUMARIN TYPE%'
+   OR medication_name LIKE '%WARFARIN%';
+
+-- Get INR lab results
+CREATE TABLE fenyolab_registry_wksp.sbapph_warfarin_inr_results AS
+SELECT wp.pat_id, wp.pat_enc_csn_id, lr.result_time, lr.numeric_value AS inr_value, lr.result_status
+FROM fenyolab_registry_wksp.sbapph_warfarin_patients wp
+LEFT JOIN fenyolab_registry.lab_result lr ON wp.pat_enc_csn_id = lr.pat_enc_csn_id
+WHERE lr.component_name LIKE '%INR%';
+
+-- Identify missed INR tests
+CREATE TABLE fenyolab_registry_wksp.sbapph_missed_inr_tests AS
+SELECT w.pat_id, w.pat_enc_csn_id, 
+       w.result_time AS expected_inr_time,
+       CASE WHEN w.inr_value IS NULL THEN 1 ELSE 0 END AS inr_missed
+FROM fenyolab_registry_wksp.sbapph_warfarin_inr_results w;
+
+-- Warfarin dose timing
+CREATE TABLE fenyolab_registry_wksp.sbapph_warfarin_dose_timing AS
+SELECT wp.pat_id, wp.pat_enc_csn_id, 
+       mar.scheduled_time, mar.taken_time, 
+       CASE WHEN mar.scheduled_time < mar.taken_time THEN 'Late' ELSE 'On Time' END AS dose_timing
+FROM fenyolab_registry_wksp.sbapph_warfarin_patients wp
+LEFT JOIN fenyolab_registry.mar ON wp.pat_enc_csn_id = mar.pat_enc_csn_id
+WHERE mar.medication LIKE '%WARFARIN%';
+
+-- Check if INR levels are out of range
+CREATE TABLE fenyolab_registry_wksp.sbapph_inr_control AS
+SELECT w.pat_id, w.pat_enc_csn_id, w.inr_value,
+       CASE WHEN w.inr_value < 2.0 THEN 'Low'
+            WHEN w.inr_value > 3.0 THEN 'High'
+            ELSE 'Within Range' END AS inr_control
+FROM fenyolab_registry_wksp.sbapph_warfarin_inr_results w;
+
+-- Check data in sbapph_warfarin_patients
+SELECT * FROM fenyolab_registry_wksp.sbapph_warfarin_patients LIMIT 10;
+
+-- Check data in sbapph_warfarin_inr_results
+SELECT * FROM fenyolab_registry_wksp.sbapph_warfarin_inr_results LIMIT 10;
+
+-- Check data in sbapph_missed_inr_tests
+SELECT * FROM fenyolab_registry_wksp.sbapph_missed_inr_tests LIMIT 10;
+
+-- Check data on patients with missed INR tests
+SELECT * 
+FROM fenyolab_registry_wksp.sbapph_missed_inr_tests
+WHERE inr_missed = 1;
+
+-- Check data in sbapph_warfarin_dose_timing
+SELECT * FROM fenyolab_registry_wksp.sbapph_warfarin_dose_timing LIMIT 10;
+
+-- Check data in sbapph_inr_control
+SELECT * FROM fenyolab_registry_wksp.sbapph_inr_control LIMIT 10;
