@@ -1,0 +1,153 @@
+
+--- 1. TOTAL NUMBER OF WARFARIN PATIENTS, TOTAL NUMBER OF INR TESTS, TOTAL NUMBER OF MISSED WARFARIN DOSES ----
+SELECT COUNT(DISTINCT m.pat_id) AS patient_count
+FROM medication m
+WHERE m.pharm_class LIKE '%COUMARIN TYPE%'
+   OR m.medication_name LIKE '%WARFARIN%';
+
+SELECT COUNT(DISTINCT m.pat_id) AS missed_doses_count
+FROM medication m
+LEFT JOIN mar mr ON m.pat_enc_csn_id = mr.pat_enc_csn_id
+WHERE (m.medication_name LIKE '%WARFARIN%')
+AND action_taken = 'Missed';
+
+SELECT 
+    COUNT(DISTINCT pat_id) AS total_patients_with_inr_tests
+FROM lab_result
+WHERE component_name LIKE '%INR%';
+
+--- 2. FREQUENCY OF MISSED INR PER PATIENT -----
+
+-- Step 1: Extract patient IDs of Warfarin patients
+
+WITH warfarin_patients AS (
+    SELECT DISTINCT pat_id
+    FROM medication
+    WHERE LOWER(medication_name) LIKE '%warfarin%'
+       OR LOWER(pharm_class) LIKE '%coumarin type%'
+),
+-- Step 2: Extract INR test results for Warfarin patients
+
+inr_tests AS (
+    SELECT 
+        lr.pat_id,
+        CAST(lr.result_time AS DATE) AS test_date
+    FROM lab_result lr
+    JOIN warfarin_patients wp
+        ON lr.pat_id = wp.pat_id
+    WHERE lr.component_name LIKE '%INR%'
+),
+-- Step 3: Identify gaps between consecutive tests
+missed_tests AS (
+    SELECT 
+        it.pat_id,
+        it.test_date,
+        LEAD(it.test_date) OVER (PARTITION BY it.pat_id ORDER BY it.test_date) AS next_test_date,
+        CASE 
+            WHEN DATEDIFF(LEAD(it.test_date) OVER (PARTITION BY it.pat_id ORDER BY it.test_date), it.test_date) > 2 THEN 1
+            ELSE 0
+        END AS is_missed
+    FROM inr_tests it
+)
+-- Step 4: Count missed tests for each patient
+SELECT 
+    pat_id,
+    COUNT(*) AS total_tests,
+    SUM(is_missed) AS missed_tests
+FROM missed_tests
+GROUP BY pat_id
+ORDER BY missed_tests DESC;
+
+----- 3. FREQUENCY OF MISSED TESTS AND AVG INR VALUES -----
+
+-- Step 1: Warfarin Patients
+WITH warfarin_patients AS (
+    SELECT DISTINCT pat_id
+    FROM medication
+    WHERE LOWER(medication_name) LIKE '%warfarin%'
+       OR LOWER(pharm_class) LIKE '%coumarin type%'
+),
+
+-- Step 2: INR Tests
+inr_tests AS (
+    SELECT 
+        lr.pat_id,
+        CAST(lr.result_time AS DATE) AS test_date,
+        lr.numeric_value AS inr_value
+    FROM lab_result lr
+    JOIN warfarin_patients wp
+        ON lr.pat_id = wp.pat_id
+    WHERE lr.component_name LIKE '%INR%'
+),
+
+-- Step 3: Missed Tests
+missed_tests AS (
+    SELECT 
+        it.pat_id,
+        it.test_date,
+        it.inr_value,
+        LEAD(it.test_date) OVER (PARTITION BY it.pat_id ORDER BY it.test_date) AS next_test_date,
+        CASE 
+            WHEN DATEDIFF(LEAD(it.test_date) OVER (PARTITION BY it.pat_id ORDER BY it.test_date), it.test_date) > 2 THEN 1
+            ELSE 0
+        END AS is_missed
+    FROM inr_tests it
+),
+
+-- Step 4: Patient-Level Summary
+missed_test_summary AS (
+    SELECT 
+        pat_id,
+        COUNT(*) AS total_tests,
+        SUM(is_missed) AS missed_tests,
+        ROUND(AVG(inr_value) / POWER(10, FLOOR(LOG10(AVG(inr_value)))), 2) AS avg_inr_value
+    FROM missed_tests
+    GROUP BY pat_id
+)
+
+-- Step 5: Final Query
+SELECT 
+    pat_id,
+    total_tests,
+    missed_tests,
+    avg_inr_value
+FROM missed_test_summary
+ORDER BY missed_tests DESC, avg_inr_value DESC;
+
+--- 4. Analyze Days to Return by Ethnicity ---
+
+WITH ethnicity_data AS (
+    SELECT p.pat_id, p.ethnicity
+    FROM patient p
+),
+transitions AS (
+    SELECT 
+        lr.pat_id,
+        lr.result_time,
+        CASE 
+            WHEN lr.numeric_value < 2.0 THEN 'Low'
+            WHEN lr.numeric_value > 3.5 THEN 'High'
+            ELSE 'Within Range'
+        END AS inr_control,
+        LAG(CASE 
+                WHEN lr.numeric_value < 2.0 THEN 'Low'
+                WHEN lr.numeric_value > 3.5 THEN 'High'
+                ELSE 'Within Range'
+            END) OVER (PARTITION BY lr.pat_id ORDER BY lr.result_time) AS previous_inr_control,
+        DATEDIFF(CAST(lr.result_time AS DATE), 
+                 CAST(LAG(lr.result_time) OVER (PARTITION BY lr.pat_id ORDER BY lr.result_time) AS DATE)) AS days_to_return
+    FROM lab_result lr
+    WHERE lr.component_name LIKE '%INR%'
+)
+SELECT 
+    t.previous_inr_control,
+    t.inr_control AS current_inr_control,
+    e.ethnicity,
+    AVG(t.days_to_return) AS avg_days_to_return,
+    MIN(t.days_to_return) AS min_days_to_return,
+    MAX(t.days_to_return) AS max_days_to_return
+FROM transitions t
+JOIN ethnicity_data e ON t.pat_id = e.pat_id
+WHERE t.inr_control = 'Within Range'
+  AND t.previous_inr_control IS NOT NULL
+GROUP BY t.previous_inr_control, t.inr_control, e.ethnicity;
