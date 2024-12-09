@@ -1,0 +1,105 @@
+
+-- Identify Warfarin patients
+WITH warfarin_patients AS (
+    SELECT DISTINCT pat_id, pat_enc_csn_id
+    FROM medication
+    WHERE pharm_class LIKE '%COUMARIN TYPE%'
+       OR medication_name LIKE '%WARFARIN%'
+)
+
+-- Get INR lab results
+, warfarin_inr_tests AS (
+    SELECT wp.pat_id, wp.pat_enc_csn_id, lr.result_time, lr.numeric_value AS inr_value, lr.result_status
+    FROM warfarin_patients wp
+    LEFT JOIN lab_result lr ON wp.pat_enc_csn_id = lr.pat_enc_csn_id
+    WHERE lr.component_name LIKE '%INR%'
+)
+
+-- Identify missed INR tests based on expected test scheduling
+, missed_inr_tests AS (
+    SELECT w.pat_id, w.pat_enc_csn_id, 
+           w.result_time AS expected_inr_time,
+           CASE WHEN w.inr_value IS NULL THEN 1 ELSE 0 END AS inr_missed
+    FROM warfarin_inr_tests w
+)
+
+-- Warfarin dose timing
+, warfarin_doses AS (
+    SELECT wp.pat_id, wp.pat_enc_csn_id, 
+           mar.scheduled_time, mar.taken_time, 
+           CASE WHEN mar.scheduled_time < mar.taken_time THEN 'Late' ELSE 'On Time' END AS dose_timing
+    FROM warfarin_patients wp
+    LEFT JOIN mar ON wp.pat_enc_csn_id = mar.pat_enc_csn_id
+    WHERE mar.medication LIKE '%WARFARIN%'
+)
+
+-- Check if INR levels are out of range
+, inr_out_of_range AS (
+    SELECT w.pat_id, w.pat_enc_csn_id, w.inr_value,
+           CASE WHEN w.inr_value < 2.0 THEN 'Low'
+                WHEN w.inr_value > 3.5 THEN 'High'
+                ELSE 'Within Range' END AS inr_control
+    FROM warfarin_inr_tests w
+)
+SELECT *
+FROM inr_out_of_range
+—
+
+-- Create a table for the out of range values
+CREATE TABLE tmp_inr_out_of_range AS
+WITH warfarin_patients AS (
+    SELECT DISTINCT pat_id, pat_enc_csn_id
+    FROM medication
+    WHERE pharm_class LIKE '%COUMARIN TYPE%'
+       OR medication_name LIKE '%WARFARIN%'
+),
+warfarin_inr_tests AS (
+    SELECT wp.pat_id, wp.pat_enc_csn_id, lr.result_time, lr.numeric_value AS inr_value, lr.result_status
+    FROM warfarin_patients wp
+    LEFT JOIN lab_result lr ON wp.pat_enc_csn_id = lr.pat_enc_csn_id
+    WHERE lr.component_name LIKE '%INR%'
+)
+SELECT w.pat_id, w.pat_enc_csn_id, w.inr_value,
+       CASE 
+           WHEN w.inr_value < 2.0 THEN 'Low'
+           WHEN w.inr_value > 3.5 THEN 'High'
+           ELSE 'Within Range' 
+       END AS inr_control
+FROM warfarin_inr_tests w;
+
+-- Create a table for patients with low values
+CREATE TABLE inr_low_table (
+    pat_id BIGINT,
+    pat_enc_csn_id BIGINT,
+    inr_value FLOAT, -- Suitable for INR values like 2.5, 3.6
+    inr_control STRING
+)
+
+INSERT INTO inr_low_table (pat_id, pat_enc_csn_id, inr_value, inr_control)
+SELECT pat_id, pat_enc_csn_id, inr_value, inr_control
+FROM tmp_inr_out_of_range
+WHERE inr_control = 'Low';
+
+-- Create a table for patients with high values
+CREATE TABLE inr_high_table (
+    pat_id BIGINT,
+    pat_enc_csn_id BIGINT,
+    inr_value FLOAT, -- Suitable for INR values like 2.5, 3.6
+    inr_control STRING
+)
+INSERT INTO inr_high_table (pat_id, pat_enc_csn_id, inr_value, inr_control)
+SELECT pat_id, pat_enc_csn_id, inr_value, inr_control
+FROM tmp_inr_out_of_range
+WHERE inr_control = 'High';
+
+-- Select all diagnoses for those with low values
+SELECT d.*
+FROM diagnosis d
+JOIN inr_low_table ilt
+ON d.pat_enc_csn_id = ilt.pat_enc_csn_id;
+
+-- Select all diagnoses for those with high values
+SELECT d.*
+FROM diagnosis d
+JOIN inr_high_table ilt
+ON d.pat_enc_csn_id = ilt.pat_enc_csn_id;
